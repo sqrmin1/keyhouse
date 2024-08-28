@@ -1,6 +1,7 @@
 #!/bin/bash
 
 VERSION='0.1.0'
+CONFIG="$HOME/.keyhouse.conf"
 
 handle_info() {
     local header="$1"
@@ -53,32 +54,42 @@ prompt_password() {
 }
 
 load_config() {
-    VAULT_FILE="$HOME/.keyhouse.gpg"
-    if [ ! -f "$VAULT_FILE" ]; then
-        handle_warning "The file $VAULT_FILE will be created."
+    if [ ! -f "$CONFIG" ]; then
+        handle_warning "No configuration file $CONFIG has been found."
+    else
+        . "$CONFIG"
+    fi
+
+    if [ -z "$vault_file" ]; then
+        vault_file="$HOME/.keyhouse.gpg"
+        handle_warning "No vault file has been indicating."
+        handle_info "Defaulting to the file $vault_file."
+    fi
+    if [ ! -f "$vault_file" ]; then
+        handle_warning "The file $vault_file will be created if necessary."
     fi
 }
 
 decrypt_vault() {
-    if [ -f "$VAULT_FILE" ]; then
-        VAULT_DATA=$(gpg \
+    if [ -f "$vault_file" ]; then
+        vault_data=$(gpg \
             --batch --yes --passphrase "$master_password" \
-            --decrypt "$VAULT_FILE" 2>/dev/null \
+            --decrypt "$vault_file" 2>/dev/null \
         )
         if [ $? -ne 0 ]; then
             handle_error "The vault could not be decrypted."
         fi
     else
-        VAULT_DATA="{}"
+        vault_data="{}"
     fi
 }
 
 encrypt_vault() {
-    echo "$VAULT_DATA" | gpg \
+    echo "$vault_data" | gpg \
         --batch --yes --symmetric --cipher-algo AES256 \
-        --passphrase "$master_password" -o "$VAULT_FILE"
-    chmod 600 "$VAULT_FILE"
-    secure_erase VAULT_DATA
+        --passphrase "$master_password" -o "$vault_file"
+    chmod 600 "$vault_file"
+    secure_erase vault_data
     secure_erase master_password
 }
 
@@ -123,7 +134,7 @@ generate_password() {
 add_account() {
     local account="$1"
 
-    details=$(echo "$VAULT_DATA" | \
+    details=$(echo "$vault_data" | \
         jq --arg account "$account" '.[$account] // empty' 2>/dev/null \
     )
     if [ -n "$details" ]; then
@@ -144,7 +155,7 @@ add_account() {
     username=$(handle_prompt "Username (optional):")
     url=$(handle_prompt "URL (optional):")
 
-    VAULT_DATA=$(echo "$VAULT_DATA" | jq \
+    vault_data=$(echo "$vault_data" | jq \
         --arg account "$account" --arg password "$password" \
         --arg username "$username" --arg url "$url" \
         '.[$account] = {password: $password, username: $username, url: $url}' \
@@ -154,7 +165,7 @@ add_account() {
 update_account() {
     local account="$1"
 
-    details=$(echo "$VAULT_DATA" | \
+    details=$(echo "$vault_data" | \
         jq --arg account "$account" '.[$account] // empty' 2>/dev/null \
     )
     if [ ! -n "$details" ]; then
@@ -177,7 +188,7 @@ update_account() {
     username=$(handle_prompt "Username (leave blank to keep value):")
     url=$(handle_prompt "URL (leave blank to keep value):")
 
-    VAULT_DATA=$(echo "$VAULT_DATA" | jq \
+    vault_data=$(echo "$vault_data" | jq \
         --arg account "$account" \
         --arg password "${password:-$(echo $details | jq -r '.password')}" \
         --arg username "${username:-$(echo $details | jq -r '.username')}" \
@@ -188,13 +199,13 @@ update_account() {
 
 list_accounts() {
     handle_info "Accounts:" ""
-    echo "$VAULT_DATA" | jq -r 'keys[]'
+    echo "$vault_data" | jq -r 'keys[]'
 }
 
 get_account() {
     local account="$1"
 
-    details=$(echo "$VAULT_DATA" | \
+    details=$(echo "$vault_data" | \
         jq --arg account "$account" '.[$account] // empty' 2>/dev/null \
     )
     if [ ! -n "$details" ]; then
@@ -213,7 +224,7 @@ get_password() {
         handle_error "The output must be used in a pipe."
     fi
 
-    password=$(echo "$VAULT_DATA" | \
+    password=$(echo "$vault_data" | \
         jq -r --arg account "$account" '.[$account].password // empty' \
     )
 
@@ -227,7 +238,7 @@ get_password() {
 delete_account() {
     local account="$1"
 
-    details=$(echo "$VAULT_DATA" | \
+    details=$(echo "$vault_data" | \
         jq --arg account "$account" '.[$account] // empty' 2>/dev/null \
     )
     if [ ! -n "$details" ]; then
@@ -235,7 +246,7 @@ delete_account() {
     fi
     handle_info "Deleting the account $account." ""
 
-    VAULT_DATA=$(echo "$VAULT_DATA" | jq \
+    vault_data=$(echo "$vault_data" | jq \
         --arg account "$account" 'del(.[$account])' \
     )
 }
