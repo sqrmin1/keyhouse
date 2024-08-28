@@ -33,6 +33,21 @@ handle_silent_prompt() {
     echo "$input"
 }
 
+secure_erase() {
+    local var_name="$1"
+    local length
+
+    eval "length=\${#${var_name}}"
+
+    if [ "$length" -gt 0 ]; then
+        eval "${var_name}=\$(head -c \$length /dev/urandom | \
+            tr -dc 'A-Za-z0-9' | head -c \$length)"
+        eval "${var_name}=''"
+    fi
+
+    unset var_name
+}
+
 prompt_password() {
     master_password=$(handle_silent_prompt "Enter the master password:")
 }
@@ -63,6 +78,8 @@ encrypt_vault() {
         --batch --yes --symmetric --cipher-algo AES256 \
         --passphrase "$master_password" -o "$VAULT_FILE"
     chmod 600 "$VAULT_FILE"
+    secure_erase VAULT_DATA
+    secure_erase master_password
 }
 
 check_password_strength() {
