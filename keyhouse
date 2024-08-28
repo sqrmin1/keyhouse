@@ -1,0 +1,362 @@
+#!/bin/bash
+
+VERSION='0.1.0'
+
+handle_info() {
+    local header="$1"
+    local message="$2"
+    echo -e "\e[0m\e[34m$header\e[0m $message"
+}
+
+handle_warning() {
+    local message="$1"
+    echo -e "\e[1m\e[33mWarning: $message\e[0m"
+}
+
+handle_error() {
+    local message="$1"
+    echo -e "\e[1m\e[31mError: $message\e[0m"
+    exit 1
+}
+
+handle_prompt() {
+    local message="$1"
+    local input=""
+    read -rep "$(echo -e "\e[0m\e[36m${message}\e[0m ")" input
+    echo "$input"
+}
+
+handle_silent_prompt() {
+    local message="$1"
+    local input=""
+    read -sep "$(echo -e "\e[0m\e[36m${message}\e[0m ")" input
+    echo "$input"
+}
+
+prompt_password() {
+    master_password=$(handle_silent_prompt "Enter the master password:")
+}
+
+load_config() {
+    VAULT_FILE="$HOME/.keyhouse.gpg"
+    if [ ! -f "$VAULT_FILE" ]; then
+        handle_warning "The file $VAULT_FILE will be created."
+    fi
+}
+
+decrypt_vault() {
+    if [ -f "$VAULT_FILE" ]; then
+        VAULT_DATA=$(gpg \
+            --batch --yes --passphrase "$master_password" \
+            --decrypt "$VAULT_FILE" 2>/dev/null \
+        )
+        if [ $? -ne 0 ]; then
+            handle_error "The vault could not be decrypted."
+        fi
+    else
+        VAULT_DATA="{}"
+    fi
+}
+
+encrypt_vault() {
+    echo "$VAULT_DATA" | gpg \
+        --batch --yes --symmetric --cipher-algo AES256 \
+        --passphrase "$master_password" -o "$VAULT_FILE"
+    chmod 600 "$VAULT_FILE"
+}
+
+check_password_strength() {
+    local password="$1"
+
+    local min_length=20
+    local min_uppercase=1
+    local min_lowercase=1
+    local min_digits=1
+    local min_special=1
+
+    if [ ${#password} -lt $min_length ]; then
+        return 1
+    fi
+    if ! echo "$password" | grep -q '[A-Z]'; then
+        return 1
+    fi
+    if ! echo "$password" | grep -q '[a-z]'; then
+        return 1
+    fi
+    if ! echo "$password" | grep -q '[0-9]'; then
+        return 1
+    fi
+    if ! echo "$password" | grep -q '[^a-zA-Z0-9]'; then
+        return 1
+    fi
+    return 0
+}
+
+generate_password() {
+    local password
+    while true; do
+        password=$(pwgen -s -B -y -1 20)
+        if check_password_strength "$password"; then
+            echo "$password"
+            return
+        fi
+    done
+}
+
+add_account() {
+    local account="$1"
+
+    details=$(echo "$VAULT_DATA" | \
+        jq --arg account "$account" '.[$account] // empty' 2>/dev/null \
+    )
+    if [ -n "$details" ]; then
+        handle_error "An account named $account already exists."
+    fi
+    handle_info "Adding the account $account." ""
+
+    generate=$(handle_prompt "Generate the password? (y/n):")
+    if [ "$generate" = "Y" ] || [ "$generate" = "y" ]; then
+        password=$(generate_password)
+    else
+        password=$(handle_silent_prompt "Password:")
+        if ! check_password_strength "$password"; then
+            handle_error "The strength of the password is too low."
+        fi
+    fi
+
+    username=$(handle_prompt "Username (optional):")
+    url=$(handle_prompt "URL (optional):")
+
+    VAULT_DATA=$(echo "$VAULT_DATA" | jq \
+        --arg account "$account" --arg password "$password" \
+        --arg username "$username" --arg url "$url" \
+        '.[$account] = {password: $password, username: $username, url: $url}' \
+    )
+}
+
+update_account() {
+    local account="$1"
+
+    details=$(echo "$VAULT_DATA" | \
+        jq --arg account "$account" '.[$account] // empty' 2>/dev/null \
+    )
+    if [ ! -n "$details" ]; then
+        handle_error "No account named $account exists."
+    fi
+    handle_info "Updating the account $account." ""
+
+    generate=$(handle_prompt "Generate a new password? (y/n):")
+    if [ "$generate" = "Y" ] || [ "$generate" = "y" ]; then
+        password=$(generate_password)
+    else
+        password=$(handle_prompt "Password (leave blank to keep value):")
+        if [ ! -z "$password" ]; then
+            if ! check_password_strength "$password"; then
+                handle_error "The strength of the password is too low."
+            fi
+        fi
+    fi
+
+    username=$(handle_prompt "Username (leave blank to keep value):")
+    url=$(handle_prompt "URL (leave blank to keep value):")
+
+    VAULT_DATA=$(echo "$VAULT_DATA" | jq \
+        --arg account "$account" \
+        --arg password "${password:-$(echo $details | jq -r '.password')}" \
+        --arg username "${username:-$(echo $details | jq -r '.username')}" \
+        --arg url "${url:-$(echo $details | jq -r '.url')}" \
+        '.[$account] = {password: $password, username: $username, url: $url}' \
+    )
+}
+
+list_accounts() {
+    handle_info "Accounts:" ""
+    echo "$VAULT_DATA" | jq -r 'keys[]'
+}
+
+get_account() {
+    local account="$1"
+
+    details=$(echo "$VAULT_DATA" | \
+        jq --arg account "$account" '.[$account] // empty' 2>/dev/null \
+    )
+    if [ ! -n "$details" ]; then
+        handle_error "No account named $account exists."
+    fi
+
+    handle_info "Account:" "$account"
+    handle_info "Username:" "$(echo "$details" | jq -r '.username')"
+    handle_info "URL:" "$(echo "$details" | jq -r '.url')"
+}
+
+get_password() {
+    local account="$1"
+
+    if [ -t 1 ]; then
+        handle_error "The output must be used in a pipe."
+    fi
+
+    password=$(echo "$VAULT_DATA" | \
+        jq -r --arg account "$account" '.[$account].password // empty' \
+    )
+
+    if [ ! -n "$password" ]; then
+        handle_error "No account named $account exists."
+    fi
+
+    echo -n "$password"
+}
+
+delete_account() {
+    local account="$1"
+
+    details=$(echo "$VAULT_DATA" | \
+        jq --arg account "$account" '.[$account] // empty' 2>/dev/null \
+    )
+    if [ ! -n "$details" ]; then
+        handle_error "No account named $account exists."
+    fi
+    handle_info "Deleting the account $account." ""
+
+    VAULT_DATA=$(echo "$VAULT_DATA" | jq \
+        --arg account "$account" 'del(.[$account])' \
+    )
+}
+
+display_help() {
+    echo -e "Usage: $0 <command> [options]"
+    echo
+    echo "Available commands:"
+    echo
+    echo "  add             Add a new account"
+    echo "    Usage: $0 add <account>"
+    echo "    Arguments:"
+    echo "      <account>    Name of the account to add"
+    echo
+    echo "  update          Update an account"
+    echo "    Usage: $0 update <account>"
+    echo "    Arguments:"
+    echo "      <account>    Name of the account to update"
+    echo
+    echo "  list            List all the accounts"
+    echo "    Usage: $0 list"
+    echo
+    echo "  get             Get the details of an account"
+    echo "    Usage: $0 get <account>"
+    echo "    Arguments:"
+    echo "      <account>    Name of the account to retrieve"
+    echo
+    echo "  get-password    Get the password of an account."
+    echo "    Usage: $0 get-password <account>"
+    echo "    Arguments:"
+    echo "      <account>    Name of account whose password to retrieve"
+    echo
+    echo "  delete          Delete an account"
+    echo "    Usage: $0 delete <account>"
+    echo "    Arguments:"
+    echo "      <account>    Name of the account to delete"
+    echo
+    echo "General options:"
+    echo "  -h, --help       Display this help message and exit"
+    echo "  -v, --version    Display the version information"
+    echo
+    echo "Examples:"
+    echo "  $0 --help"
+    echo "  $0 add Github"
+    echo "  $0 get-password Github"
+}
+
+display_version() {
+    echo "$0 $VERSION"
+}
+
+main() {
+    local command="$1"
+    shift
+
+    case "$command" in
+        add)
+            if [ "$#" -ne 1 ]; then
+                handle_warning "The name of the account is missing."
+                display_help
+            else
+                load_config
+                prompt_password
+                decrypt_vault
+                add_account "$1"
+                encrypt_vault
+            fi
+            ;;
+        update)
+            if [ "$#" -ne 1 ]; then
+                handle_warning "The name of the account is missing."
+                display_help
+            else
+                load_config
+                prompt_password
+                decrypt_vault
+                update_account "$1"
+                encrypt_vault
+            fi
+            ;;
+        list)
+            load_config
+            prompt_password
+            decrypt_vault
+            list_accounts
+            encrypt_vault
+            ;;
+        get)
+            if [ "$#" -ne 1 ]; then
+                handle_warning "The name of the account is missing."
+                display_help
+            else
+                load_config
+                prompt_password
+                decrypt_vault
+                get_account "$1"
+                encrypt_vault
+            fi
+            ;;
+        get-password)
+            if [ "$#" -ne 1 ]; then
+                handle_warning "The name of the account is missing."
+                display_help
+            else
+                load_config
+                prompt_password
+                decrypt_vault
+                get_password "$1"
+                encrypt_vault
+            fi
+            ;;
+        delete)
+            if [ "$#" -ne 1 ]; then
+                handle_warning "The name of the account is missing."
+                display_help
+            else
+                load_config
+                prompt_password
+                decrypt_vault
+                delete_account "$1"
+                encrypt_vault
+            fi
+            ;;
+        -h|--help) display_help
+            display_help
+            ;;
+        -v|--version)
+            display_version
+            ;;
+        *)
+            handle_warning "An invalid command has been used."
+            display_help
+            ;;
+    esac
+}
+
+if [ $# -eq 0 ]; then
+    display_help
+else
+    main "$@"
+fi
